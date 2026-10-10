@@ -50,6 +50,14 @@ public class PerformanceComparator {
         table.add(runAlgorithm("Rabin-Karp", singleCandidates, keyword, RabinKarp::search));
         table.add(runAlgorithm("Z-Algorithm", singleCandidates, keyword, ZAlgorithm::search));
         table.add(runAhoCorasick(multiCandidates, tokens));
+        table.add(runAlgorithm("Wagner-Fischer (Levenshtein)", singleCandidates, keyword,
+                (t, p) -> com.unicodesearch.algorithm.ApproximatePatternMatcher.search(t, p, com.unicodesearch.algorithm.ApproximatePatternMatcher.Algorithm.WAGNER_FISCHER)));
+        table.add(runAlgorithm("Damerau-Levenshtein", singleCandidates, keyword,
+                (t, p) -> com.unicodesearch.algorithm.ApproximatePatternMatcher.search(t, p, com.unicodesearch.algorithm.ApproximatePatternMatcher.Algorithm.DAMERAU_LEVENSHTEIN)));
+        table.add(runAlgorithm("Weighted Edit Distance", singleCandidates, keyword,
+                (t, p) -> com.unicodesearch.algorithm.ApproximatePatternMatcher.search(t, p, com.unicodesearch.algorithm.ApproximatePatternMatcher.Algorithm.WEIGHTED_EDIT_DISTANCE)));
+        table.add(runAlgorithm("Needleman-Wunsch (Alignment)", singleCandidates, keyword,
+                (t, p) -> com.unicodesearch.algorithm.ApproximatePatternMatcher.search(t, p, com.unicodesearch.algorithm.ApproximatePatternMatcher.Algorithm.NEEDLEMAN_WUNSCH)));
         return table;
     }
 

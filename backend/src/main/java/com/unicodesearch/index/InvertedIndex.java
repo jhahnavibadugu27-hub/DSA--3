@@ -43,6 +43,8 @@ public class InvertedIndex {
 
     private final Map<String, List<Posting>> index = new HashMap<>();
     private final Map<String, Document> documentsById = new LinkedHashMap<>();
+    private final com.unicodesearch.algorithm.Trie vocabularyTrie = new com.unicodesearch.algorithm.Trie();
+    private final com.unicodesearch.algorithm.TermSuffixTrie suffixTrie = new com.unicodesearch.algorithm.TermSuffixTrie();
     private int totalPostings = 0;
 
     /**
@@ -74,6 +76,12 @@ public class InvertedIndex {
                 index.computeIfAbsent(entry.getKey(), k -> new ArrayList<>()).add(entry.getValue());
                 totalPostings++;
             }
+        }
+
+        // Populate vocabulary Trie and TermSuffixTrie for instant O(|kw|) candidate lookups
+        for (String term : index.keySet()) {
+            vocabularyTrie.insert(term);
+            suffixTrie.insertTerm(term);
         }
     }
 
@@ -112,16 +120,13 @@ public class InvertedIndex {
     // Containment (substring-in-word) candidate retrieval
     // ------------------------------------------------------------------
 
-    /** Every dictionary term that contains the keyword (found with KMP over the dictionary). */
+    /**
+     * Every dictionary term that contains the keyword.
+     * Uses the TermSuffixTrie (O(|keyword|) descent) rather than a linear scan over all dictionary terms.
+     */
     public List<String> getDictionaryTermsContaining(String keyword) {
-        List<String> terms = new ArrayList<>();
-        if (keyword == null || keyword.isEmpty()) return terms;
-        int[] lps = KMP.buildLPS(keyword); // built ONCE, reused for every dictionary term
-        for (String term : index.keySet()) {
-            if (KMP.contains(term, keyword, lps)) terms.add(term);
-        }
-        Collections.sort(terms);
-        return terms;
+        if (keyword == null || keyword.isEmpty()) return Collections.emptyList();
+        return suffixTrie.getTermsContaining(keyword);
     }
 
     /** Documents containing the keyword anywhere inside a word (see class comment). */
@@ -130,7 +135,10 @@ public class InvertedIndex {
         if (cached != null) return cached;
         Set<String> docs = new LinkedHashSet<>();
         for (String term : getDictionaryTermsContaining(keyword)) {
-            for (Posting p : index.get(term)) docs.add(p.getDocumentId());
+            List<Posting> postings = index.get(term);
+            if (postings != null) {
+                for (Posting p : postings) docs.add(p.getDocumentId());
+            }
         }
         if (containingCache.size() < CACHE_LIMIT) containingCache.put(keyword, docs);
         return docs;
@@ -140,11 +148,20 @@ public class InvertedIndex {
     public boolean dictionaryContains(String keyword) {
         if (index.containsKey(keyword)) return true;
         if (containingCache.containsKey(keyword)) return !containingCache.get(keyword).isEmpty();
-        int[] lps = KMP.buildLPS(keyword);
-        for (String term : index.keySet()) {
-            if (KMP.contains(term, keyword, lps)) return true;
-        }
-        return false;
+        return suffixTrie.containsSubstring(keyword);
+    }
+
+    /** Returns dictionary terms starting with the prefix using the vocabulary Trie in O(|prefix|). */
+    public List<String> getDictionaryTermsWithPrefix(String prefix) {
+        return vocabularyTrie.collectWordsWithPrefix(prefix);
+    }
+
+    public com.unicodesearch.algorithm.Trie getVocabularyTrie() {
+        return vocabularyTrie;
+    }
+
+    public com.unicodesearch.algorithm.TermSuffixTrie getSuffixTrie() {
+        return suffixTrie;
     }
 
     /**

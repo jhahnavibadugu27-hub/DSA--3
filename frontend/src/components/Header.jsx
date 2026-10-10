@@ -2,6 +2,7 @@ import { NavLink } from 'react-router-dom';
 
 const links = [
   { to: '/', label: 'Search' },
+  { to: '/algorithms', label: 'Algorithm Lab' },
   { to: '/performance', label: 'Performance' },
   { to: '/flow', label: 'Network Flow' },
   { to: '/dataset', label: 'Dataset' },

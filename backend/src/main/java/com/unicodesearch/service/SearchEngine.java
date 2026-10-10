@@ -5,6 +5,7 @@ import com.unicodesearch.algorithm.KMP;
 import com.unicodesearch.algorithm.NaiveSearch;
 import com.unicodesearch.algorithm.RabinKarp;
 import com.unicodesearch.algorithm.ZAlgorithm;
+import com.unicodesearch.algorithm.ApproximatePatternMatcher;
 import com.unicodesearch.index.InvertedIndex;
 import com.unicodesearch.model.Document;
 import com.unicodesearch.model.MatchResult;
@@ -70,6 +71,9 @@ public class SearchEngine {
         public List<Map<String, Object>> corrections = new ArrayList<>();
         public Map<String, List<Map<String, Object>>> suggestions = new LinkedHashMap<>();
         public String message;
+        public int candidateDocuments;
+        public double indexReductionPercent;
+        public String normalizedQuery;
         public List<SearchResultItem> results = Collections.emptyList();
         /** Non-null only when the query was rejected (e.g. too many keywords). */
         public String error;
@@ -162,7 +166,8 @@ public class SearchEngine {
         boolean multi = searchKeywords.size() >= 2;
         response.mode = multi ? "multi" : "single";
         String resolved = resolveAlgorithm(algorithm, searchKeywords.size());
-        if (multi && !"ahocorasick".equals(resolved)) {
+        boolean isApprox = isApproximateAlgorithm(resolved);
+        if (multi && !"ahocorasick".equals(resolved) && !isApprox) {
             response.algorithmNote = "Multi-keyword queries use Aho-Corasick (one pass, AND semantics); the selected "
                     + "single-pattern algorithm applies to one-keyword queries.";
             resolved = "ahocorasick";
@@ -171,7 +176,12 @@ public class SearchEngine {
 
         // ---- 3. Candidate documents from the inverted index: docs(k1) AND ... AND docs(kN) ----
         Map<String, Integer> perKeywordCounts = new LinkedHashMap<>();
-        Set<String> candidateIds = invertedIndex.getCandidateDocumentsForAllContaining(searchKeywords, perKeywordCounts);
+        Set<String> candidateIds;
+        if (isApprox) {
+            candidateIds = getApproximateCandidateDocuments(searchKeywords, resolved, perKeywordCounts);
+        } else {
+            candidateIds = invertedIndex.getCandidateDocumentsForAllContaining(searchKeywords, perKeywordCounts);
+        }
         response.keywordDocumentCounts = perKeywordCounts;
 
         List<Document> candidates = new ArrayList<>();
@@ -198,14 +208,23 @@ public class SearchEngine {
                 Map<String, List<Integer>> found = automaton.searchAll(text); // ONE pass, all keywords
                 for (String kw : searchKeywords) positions.put(kw, found.getOrDefault(kw, Collections.emptyList()));
             } else {
-                String kw = searchKeywords.get(0);
-                MatchResult mr = switch (resolved) {
-                    case "rabinkarp" -> RabinKarp.search(text, kw);
-                    case "naive" -> NaiveSearch.search(text, kw);
-                    case "zalgorithm" -> ZAlgorithm.search(text, kw);
-                    default -> KMP.search(text, kw);
-                };
-                positions.put(kw, mr.getPositions());
+                for (String kw : searchKeywords) {
+                    MatchResult mr = switch (resolved) {
+                        case "rabinkarp" -> RabinKarp.search(text, kw);
+                        case "naive" -> NaiveSearch.search(text, kw);
+                        case "zalgorithm" -> ZAlgorithm.search(text, kw);
+                        case "wagnerfischer" -> ApproximatePatternMatcher.search(
+                                text, kw, ApproximatePatternMatcher.Algorithm.WAGNER_FISCHER);
+                        case "dameraulevenshtein" -> ApproximatePatternMatcher.search(
+                                text, kw, ApproximatePatternMatcher.Algorithm.DAMERAU_LEVENSHTEIN);
+                        case "weightededitdistance" -> ApproximatePatternMatcher.search(
+                                text, kw, ApproximatePatternMatcher.Algorithm.WEIGHTED_EDIT_DISTANCE);
+                        case "needlemanwunsch" -> ApproximatePatternMatcher.search(
+                                text, kw, ApproximatePatternMatcher.Algorithm.NEEDLEMAN_WUNSCH);
+                        default -> KMP.search(text, kw);
+                    };
+                    positions.put(kw, mr.getPositions());
+                }
             }
 
             // AND filter: reject the document if ANY keyword has zero matches.
@@ -224,18 +243,25 @@ public class SearchEngine {
                 if (!exactDocs.get(kw).contains(doc.getId())) { allExact = false; break; }
             }
 
-            double score = rankingEngine.score(doc, freq, searchKeywords, allExact);
+            RankingEngine.RankingBreakdown breakdown = rankingEngine.explainScore(doc, freq, searchKeywords, allExact);
             String snippet = SnippetExtractor.build(doc.getNormalizedContent(), positions);
 
             results.add(new SearchResultItem(doc.getId(), doc.getTitle(), doc.getLanguage(),
-                    totalMatches, score, snippet, freq, new ArrayList<>(searchKeywords)));
+                    totalMatches, breakdown.finalScore, snippet, freq, new ArrayList<>(searchKeywords),
+                    positions, breakdown.toMap()));
         }
 
         results.sort(Comparator.comparingDouble(SearchResultItem::getScore).reversed()
                 .thenComparing(Comparator.comparingInt(SearchResultItem::getMatchCount).reversed())
                 .thenComparing(SearchResultItem::getTitle));
 
+        response.candidateDocuments = candidateIds.size();
         response.documentsScanned = candidates.size();
+        if (response.totalDocuments > 0) {
+            response.indexReductionPercent = Math.round(((double) (response.totalDocuments - response.documentsScanned)
+                    / response.totalDocuments * 100.0) * 10.0) / 10.0;
+        }
+        response.normalizedQuery = String.join(" ", searchKeywords);
         response.totalResults = results.size();
         response.results = results;
         response.message = buildMessage(response, searchKeywords, multi);
@@ -269,6 +295,46 @@ public class SearchEngine {
                 + ("all".equalsIgnoreCase(r.language) ? "." : " in the selected language.");
     }
 
+    public static boolean isApproximateAlgorithm(String a) {
+        if (a == null) return false;
+        return switch (a) {
+            case "wagnerfischer", "dameraulevenshtein", "weightededitdistance", "needlemanwunsch" -> true;
+            default -> false;
+        };
+    }
+
+    private Set<String> getApproximateCandidateDocuments(List<String> keywords, String resolved, Map<String, Integer> perKeywordCounts) {
+        Set<String> intersection = null;
+        for (String kw : keywords) {
+            Set<String> docsForKw = new LinkedHashSet<>(invertedIndex.getDocumentsContaining(kw));
+            int threshold = Math.max(1, kw.length() / 4);
+            for (String dictTerm : invertedIndex.getDictionary()) {
+                if (Math.abs(dictTerm.length() - kw.length()) > threshold + 1) continue;
+                boolean match = switch (resolved) {
+                    case "dameraulevenshtein" ->
+                        com.unicodesearch.algorithm.DamerauLevenshtein.distance(dictTerm, kw) <= threshold;
+                    case "weightededitdistance" ->
+                        com.unicodesearch.algorithm.WeightedEditDistance.compute(dictTerm, kw, 1.0, 1.0, 1.0, 1.0).distance <= (double) threshold;
+                    case "needlemanwunsch" ->
+                        com.unicodesearch.algorithm.NeedlemanWunsch.align(dictTerm, kw, 2, -1, -1).identityPercent >= 70.0;
+                    case "wagnerfischer" ->
+                        com.unicodesearch.algorithm.WagnerFischer.compute(dictTerm, kw).distance <= threshold;
+                    default -> false;
+                };
+                if (match) {
+                    docsForKw.addAll(invertedIndex.getCandidateDocuments(dictTerm));
+                }
+            }
+            if (perKeywordCounts != null) perKeywordCounts.put(kw, docsForKw.size());
+            if (intersection == null) {
+                intersection = new LinkedHashSet<>(docsForKw);
+            } else {
+                intersection.retainAll(docsForKw);
+            }
+        }
+        return intersection == null ? Collections.emptySet() : intersection;
+    }
+
     /** Normalizes an algorithm name; "auto" -> KMP for one keyword, Aho-Corasick for several. */
     static String resolveAlgorithm(String requested, int keywordCount) {
         if (requested == null || requested.isBlank() || "auto".equalsIgnoreCase(requested)) {
@@ -280,6 +346,10 @@ public class SearchEngine {
             case "rabinkarp", "rk" -> "rabinkarp";
             case "aho", "ahocorasick" -> "ahocorasick";
             case "naive" -> "naive";
+            case "wagnerfischer", "wagner", "levenshtein", "wf" -> "wagnerfischer";
+            case "damerau", "dameraulevenshtein", "dl" -> "dameraulevenshtein";
+            case "weighted", "weightededitdistance", "wed" -> "weightededitdistance";
+            case "needleman", "needlemanwunsch", "nw", "alignment" -> "needlemanwunsch";
             default -> "kmp";
         };
     }

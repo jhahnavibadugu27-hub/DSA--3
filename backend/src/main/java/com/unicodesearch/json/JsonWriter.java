@@ -34,9 +34,21 @@ public final class JsonWriter {
             writeMap((Map<String, ?>) value, sb);
         } else if (value instanceof List) {
             writeList((List<?>) value, sb);
+        } else if (value.getClass().isArray()) {
+            writeArray(value, sb);
         } else {
             writeString(value.toString(), sb);
         }
+    }
+
+    private static void writeArray(Object array, StringBuilder sb) {
+        sb.append('[');
+        int len = java.lang.reflect.Array.getLength(array);
+        for (int i = 0; i < len; i++) {
+            if (i > 0) sb.append(',');
+            writeValue(java.lang.reflect.Array.get(array, i), sb);
+        }
+        sb.append(']');
     }
 
     private static void writeMap(Map<String, ?> map, StringBuilder sb) {

@@ -12,6 +12,12 @@ import com.unicodesearch.service.KeywordDocumentFlowAnalyzer;
 import com.unicodesearch.service.PerformanceComparator;
 import com.unicodesearch.service.SearchEngine;
 
+import com.unicodesearch.algorithm.WagnerFischer;
+import com.unicodesearch.algorithm.DamerauLevenshtein;
+import com.unicodesearch.algorithm.WeightedEditDistance;
+import com.unicodesearch.algorithm.NeedlemanWunsch;
+import com.unicodesearch.algorithm.OptimalBST;
+
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
@@ -66,6 +72,9 @@ public class ApiServer {
         server.createContext("/api/documents/", ApiServer::handleDocumentById);
         server.createContext("/api/performance", ApiServer::handlePerformance);
         server.createContext("/api/index/rebuild", ApiServer::handleRebuild);
+        server.createContext("/api/algorithms/edit-distance", ApiServer::handleEditDistance);
+        server.createContext("/api/algorithms/alignment", ApiServer::handleAlignment);
+        server.createContext("/api/algorithms/obst", ApiServer::handleObst);
         // Thread pool: requests are handled concurrently instead of one at a time.
         server.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(
                 Math.max(4, Runtime.getRuntime().availableProcessors())));
@@ -118,7 +127,10 @@ public class ApiServer {
         json.put("searchMode", resp.searchMode);
         json.put("executionTimeMs", round(resp.executionTimeMs));
         json.put("documentsScanned", resp.documentsScanned);
+        json.put("candidateDocuments", resp.candidateDocuments);
         json.put("totalDocuments", resp.totalDocuments);
+        json.put("indexReductionPercent", resp.indexReductionPercent);
+        json.put("normalizedQuery", resp.normalizedQuery);
         json.put("totalResults", resp.totalResults);
         json.put("keywordCount", resp.keywordCount);
         json.put("keywords", resp.keywords);
@@ -138,6 +150,8 @@ public class ApiServer {
             r.put("snippet", item.getSnippet());
             r.put("matchedKeywords", item.getMatchedKeywords());
             r.put("keywordFrequencies", item.getKeywordFrequencies());
+            r.put("matchPositions", item.getMatchPositions());
+            r.put("rankingExplanation", item.getRankingExplanation());
             resultsJson.add(r);
         }
         json.put("results", resultsJson);
@@ -237,11 +251,40 @@ public class ApiServer {
             sendJson(exchange, 404, Map.of("error", "Document not found: " + id));
             return;
         }
+        Map<String, String> params = parseQuery(exchange.getRequestURI().getRawQuery());
+        String query = params.getOrDefault("query", "").trim();
+
         Map<String, Object> json = new LinkedHashMap<>();
         json.put("id", doc.getId());
         json.put("title", doc.getTitle());
         json.put("language", doc.getLanguage());
         json.put("content", doc.getRawContent());
+        json.put("normalizedContent", doc.getNormalizedContent());
+
+        if (!query.isEmpty()) {
+            List<String> tokens = com.unicodesearch.util.UnicodeUtil.tokenize(query);
+            Map<String, List<Integer>> positions = new LinkedHashMap<>();
+            int totalMatches = 0;
+            if (tokens.size() >= 2) {
+                com.unicodesearch.algorithm.AhoCorasick ac = new com.unicodesearch.algorithm.AhoCorasick(tokens);
+                Map<String, List<Integer>> found = ac.searchAll(doc.getSearchableContent());
+                for (String t : tokens) {
+                    List<Integer> p = found.getOrDefault(t, Collections.emptyList());
+                    positions.put(t, p);
+                    totalMatches += p.size();
+                }
+            } else if (!tokens.isEmpty()) {
+                String kw = tokens.get(0);
+                com.unicodesearch.model.MatchResult mr = com.unicodesearch.algorithm.KMP.search(doc.getSearchableContent(), kw);
+                positions.put(kw, mr.getPositions());
+                totalMatches = mr.getMatchCount();
+            }
+            json.put("query", query);
+            json.put("keywords", tokens);
+            json.put("totalMatches", totalMatches);
+            json.put("matchPositions", positions);
+        }
+
         sendJson(exchange, 200, json);
     }
 
@@ -272,6 +315,138 @@ public class ApiServer {
         } catch (IOException e) {
             sendJson(exchange, 500, Map.of("error", e.getMessage()));
         }
+    }
+
+    private static void handleEditDistance(HttpExchange exchange) throws IOException {
+        if (!allowCors(exchange)) return;
+        Map<String, String> params = parseQuery(exchange.getRequestURI().getRawQuery());
+        String s1 = params.getOrDefault("s1", "kitten");
+        String s2 = params.getOrDefault("s2", "sitting");
+        String type = params.getOrDefault("type", "wagner-fischer").toLowerCase();
+
+        Map<String, Object> json = new LinkedHashMap<>();
+        json.put("s1", s1);
+        json.put("s2", s2);
+        json.put("type", type);
+
+        if ("damerau".equals(type) || "damerau-levenshtein".equals(type)) {
+            DamerauLevenshtein.Result r = DamerauLevenshtein.compute(s1, s2);
+            json.put("distance", r.distance);
+            json.put("matrix", r.matrix);
+            json.put("operations", r.operations);
+            json.put("path", r.path);
+            json.put("sourceChars", r.sourceChars);
+            json.put("targetChars", r.targetChars);
+            json.put("algorithmName", "Damerau-Levenshtein (Adjacent Transposition)");
+        } else if ("weighted".equals(type)) {
+            double ins = parseDouble(params.get("ins"), 1.0);
+            double del = parseDouble(params.get("del"), 1.0);
+            double sub = parseDouble(params.get("sub"), 1.0);
+            double trans = parseDouble(params.get("trans"), 1.0);
+            WeightedEditDistance.Result r = WeightedEditDistance.compute(s1, s2, ins, del, sub, trans);
+            json.put("distance", round(r.distance));
+            json.put("matrix", r.matrix);
+            json.put("operations", r.operations);
+            json.put("path", r.path);
+            json.put("sourceChars", r.sourceChars);
+            json.put("targetChars", r.targetChars);
+            json.put("costs", Map.of("insert", ins, "delete", del, "substitute", sub, "transpose", trans));
+            json.put("algorithmName", "Weighted Edit Distance");
+        } else {
+            WagnerFischer.Result r = WagnerFischer.compute(s1, s2);
+            json.put("distance", r.distance);
+            json.put("matrix", r.matrix);
+            json.put("operations", r.operations);
+            json.put("path", r.path);
+            json.put("sourceChars", r.sourceChars);
+            json.put("targetChars", r.targetChars);
+            json.put("algorithmName", "Wagner-Fischer (Levenshtein DP Table)");
+        }
+
+        sendJson(exchange, 200, json);
+    }
+
+    private static void handleAlignment(HttpExchange exchange) throws IOException {
+        if (!allowCors(exchange)) return;
+        Map<String, String> params = parseQuery(exchange.getRequestURI().getRawQuery());
+        String seq1 = params.getOrDefault("seq1", "GCATGCG");
+        String seq2 = params.getOrDefault("seq2", "GATTACA");
+        int match = parseInt(params.get("match"), 2);
+        int mismatch = parseInt(params.get("mismatch"), -1);
+        int gap = parseInt(params.get("gap"), -1);
+
+        NeedlemanWunsch.AlignmentResult r = NeedlemanWunsch.align(seq1, seq2, match, mismatch, gap);
+        Map<String, Object> json = new LinkedHashMap<>();
+        json.put("algorithm", "Needleman-Wunsch Global Sequence Alignment");
+        json.put("seq1", seq1);
+        json.put("seq2", seq2);
+        json.put("parameters", Map.of("matchReward", match, "mismatchPenalty", mismatch, "gapPenalty", gap));
+        json.put("score", r.score);
+        json.put("alignedSeq1", r.alignedSeq1);
+        json.put("alignedSeq2", r.alignedSeq2);
+        json.put("alignmentMarkup", r.alignmentMarkup);
+        json.put("matchCount", r.matchCount);
+        json.put("mismatchCount", r.mismatchCount);
+        json.put("gapCount", r.gapCount);
+        json.put("identityPercent", r.identityPercent);
+        json.put("matrix", r.matrix);
+        json.put("path", r.path);
+        json.put("seq1Chars", r.seq1Chars);
+        json.put("seq2Chars", r.seq2Chars);
+
+        sendJson(exchange, 200, json);
+    }
+
+    private static void handleObst(HttpExchange exchange) throws IOException {
+        if (!allowCors(exchange)) return;
+        Map<String, String> params = parseQuery(exchange.getRequestURI().getRawQuery());
+
+        List<String> keys = new ArrayList<>();
+        List<Double> freqs = new ArrayList<>();
+
+        if (params.containsKey("keys") && !params.get("keys").isBlank()) {
+            for (String k : params.get("keys").split(",")) {
+                String clean = k.trim();
+                if (!clean.isEmpty()) keys.add(clean);
+            }
+            if (params.containsKey("freqs")) {
+                for (String f : params.get("freqs").split(",")) {
+                    try { freqs.add(Double.parseDouble(f.trim())); } catch (Exception ignored) { freqs.add(1.0); }
+                }
+            }
+        } else {
+            // Default: pick top popular search keywords from inverted index
+            List<String> defaults = List.of("computer", "data", "engineering", "india", "network", "research", "science", "technology");
+            for (String term : defaults) {
+                keys.add(term);
+                int df = invertedIndex != null ? invertedIndex.getDocumentFrequency(term) : 1;
+                freqs.add((double) Math.max(1, df));
+            }
+        }
+
+        OptimalBST.OBSTResult r = OptimalBST.compute(keys, freqs);
+        Map<String, Object> json = new LinkedHashMap<>();
+        json.put("algorithm", "Optimal Binary Search Tree (DP)");
+        json.put("keys", r.keys);
+        json.put("frequencies", r.frequencies);
+        json.put("expectedCost", r.expectedCost);
+        json.put("costMatrix", r.costMatrix);
+        json.put("weightMatrix", r.weightMatrix);
+        json.put("rootMatrix", r.rootMatrix);
+        json.put("rootNode", r.rootNode);
+        json.put("inOrderTraversal", r.inOrderTraversal);
+
+        sendJson(exchange, 200, json);
+    }
+
+    private static double parseDouble(String s, double fallback) {
+        if (s == null || s.isBlank()) return fallback;
+        try { return Double.parseDouble(s.trim()); } catch (Exception e) { return fallback; }
+    }
+
+    private static int parseInt(String s, int fallback) {
+        if (s == null || s.isBlank()) return fallback;
+        try { return Integer.parseInt(s.trim()); } catch (Exception e) { return fallback; }
     }
 
     // ---------- Helpers ----------

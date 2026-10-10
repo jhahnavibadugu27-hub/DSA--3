@@ -121,7 +121,7 @@ public class SearchEngineTests {
         check("50 keywords: only the doc holding ALL 50 qualifies", r50b.totalResults == 1 && r50b.results.get(0).getDocumentId().equals("fx-all50"));
 
         // ---- Test 11: fuzzy (fixture has 'computer') ----
-        List<Document> fx2 = new ArrayList<>(docs);
+        List<Document> fx2 = new ArrayList<>();
         fx2.add(new Document("fx-cs", "Computer Science", "english", "A Computer runs software.\nComputer Science studies algorithms.\n\nScience and technology of India and water."));
         fx2.add(new Document("fx-c", "Computers", "english", "Every computer needs power."));
         InvertedIndex idx2 = new InvertedIndex(); idx2.build(fx2);
@@ -172,6 +172,65 @@ public class SearchEngineTests {
         check("flow: keyword nodes=3, matching size == maxFlow", (int) flow.get("keywordNodes") == 3 && (int) flow.get("matchingSize") == mf);
         var flow2 = new KeywordDocumentFlowAnalyzer(idx2).analyze("computer science", "all", "edmondskarp", 5);
         check("flow: demand 5 exceeds supply -> bottleneck reported", !(boolean) flow2.get("fullyMatched") && !((List<?>) flow2.get("unmatchedKeywords")).isEmpty());
+
+        // ---- DSA Improvements & Response Metrics ----
+        var tstRes = idx.getDictionaryTermsContaining("ind");
+        check("TermSuffixTrie candidate lookup finds terms containing 'ind'", !tstRes.isEmpty() && tstRes.contains("india"));
+        var prefRes = idx.getDictionaryTermsWithPrefix("ind");
+        check("vocabularyTrie prefix lookup finds terms starting with 'ind'", !prefRes.isEmpty() && prefRes.contains("india"));
+
+        var indResp = se.search("india", "all", "kmp", "");
+        check("response contains candidateDocuments and indexReductionPercent",
+                indResp.candidateDocuments > 0 && indResp.indexReductionPercent >= 0.0);
+        check("first search result has matchPositions and rankingExplanation",
+                !indResp.results.isEmpty()
+                        && !indResp.results.get(0).getMatchPositions().isEmpty()
+                        && indResp.results.get(0).getRankingExplanation().containsKey("frequencyScore")
+                        && indResp.results.get(0).getRankingExplanation().containsKey("titleMatchBonus"));
+
+        // ---- Advanced DP Algorithms: Edit Distance, Alignment, OBST ----
+        var wfRes = WagnerFischer.compute("kitten", "sitting");
+        check("Wagner-Fischer kitten/sitting distance=3 with valid DP matrix",
+                wfRes.distance == 3 && wfRes.matrix[6][7] == 3 && !wfRes.path.isEmpty());
+
+        var dlRes = DamerauLevenshtein.compute("teh", "the");
+        check("Damerau-Levenshtein transposition 'teh' -> 'the' distance=1",
+                dlRes.distance == 1 && dlRes.operations.stream().anyMatch(op -> op.startsWith("TRANSPOSE")));
+        check("Damerau-Levenshtein transposition 'ca' -> 'ac' distance=1",
+                DamerauLevenshtein.distance("ca", "ac") == 1);
+
+        var weightedRes = WeightedEditDistance.compute("a", "ab", 0.5, 1.0, 2.0, 1.0);
+        check("Weighted Edit Distance custom insertion cost 0.5",
+                Math.abs(weightedRes.distance - 0.5) < 1e-6);
+
+        var nwRes = NeedlemanWunsch.align("GCATGCG", "GATTACA", 1, -1, -1);
+        check("Needleman-Wunsch sequence alignment score and equal-length aligned strings",
+                nwRes.score == 0
+                        && nwRes.alignedSeq1.length() == nwRes.alignedSeq2.length()
+                        && nwRes.matchCount > 0);
+
+        var obstRes = OptimalBST.compute(List.of("A", "B", "C"), List.of(0.5, 0.3, 0.2));
+        check("Optimal BST DP computes positive expected cost and preserves in-order traversal",
+                obstRes.expectedCost > 0
+                        && obstRes.inOrderTraversal.equals(List.of("A", "B", "C"))
+                        && obstRes.rootNode.containsKey("key"));
+
+        // ---- Article Search using DP / Alignment Algorithms ----
+        var wfSearch = se.search("computer", "all", "wagnerfischer", "");
+        check("Search with Wagner-Fischer returns articles: total=" + wfSearch.totalResults,
+                wfSearch.totalResults > 0 && "wagnerfischer".equals(wfSearch.algorithm));
+
+        var dlSearch = se.search("computr", "all", "dameraulevenshtein", "");
+        check("Search with Damerau-Levenshtein typo 'computr' returns articles: total=" + dlSearch.totalResults,
+                dlSearch.totalResults > 0 && "dameraulevenshtein".equals(dlSearch.algorithm));
+
+        var nwSearch = se.search("science", "all", "needlemanwunsch", "");
+        check("Search with Needleman-Wunsch returns articles: total=" + nwSearch.totalResults,
+                nwSearch.totalResults > 0 && "needlemanwunsch".equals(nwSearch.algorithm));
+
+        var wedSearch = se.search("technology", "all", "weightededitdistance", "");
+        check("Search with Weighted Edit Distance returns articles: total=" + wedSearch.totalResults,
+                wedSearch.totalResults > 0 && "weightededitdistance".equals(wedSearch.algorithm));
 
         System.out.println("\n" + pass + " passed, " + fail + " failed");
         System.exit(fail == 0 ? 0 : 1);

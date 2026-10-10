@@ -1,3 +1,7 @@
-TITLE: Mathematics
+TITLE: Mathematics and Computational Science
 
-Mathematics is an important subject in modern education. Students learn new concepts by studying Mathematics. Research in the field of Mathematics contributes to the development of the country.
+Mathematics serves as the universal foundation for science and modern computer technology in India. From classical history to contemporary research, mathematical concepts guide the development of every advanced algorithm.
+
+In university departments, students study discrete mathematics, probability, and numerical analysis. These fields underpin modern data science, theoretical physics, cryptography, and computer programming.
+
+As data volumes expand, mathematical models enable breakthroughs in machine learning and quantum computing. Continued research in mathematics empowers engineering disciplines and prepares students for leadership in technological innovation.

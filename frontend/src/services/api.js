@@ -37,8 +37,8 @@ export function getLanguages() {
   return getJson('/languages');
 }
 
-export function getDocument(id) {
-  return getJson(`/documents/${encodeURIComponent(id)}`);
+export function getDocument(id, query = '') {
+  return getJson(`/documents/${encodeURIComponent(id)}`, query ? { query } : {});
 }
 
 export function getPerformance({ query, language = 'all' }) {
@@ -48,4 +48,16 @@ export function getPerformance({ query, language = 'all' }) {
 export async function rebuildIndex() {
   const res = await fetch(`${BASE_URL}/index/rebuild`);
   return res.json();
+}
+
+export function getEditDistance({ s1, s2, type = 'wagner-fischer', ins = 1, del = 1, sub = 1, trans = 1 }) {
+  return getJson('/algorithms/edit-distance', { s1, s2, type, ins, del, sub, trans });
+}
+
+export function getSequenceAlignment({ seq1, seq2, match = 2, mismatch = -1, gap = -1 }) {
+  return getJson('/algorithms/alignment', { seq1, seq2, match, mismatch, gap });
+}
+
+export function getOptimalBST({ keys = '', freqs = '' } = {}) {
+  return getJson('/algorithms/obst', { keys, freqs });
 }
